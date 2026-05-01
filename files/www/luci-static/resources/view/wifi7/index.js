@@ -710,6 +710,24 @@ return view.extend({
         var r2lpi    = mkChk(r2['lpi_enable'] === '1');
         var r2noscan = mkChk(r2['noscan']     === '1');
 
+        // txpower -- empty = automatic (regulatory maximum, recommended)
+        function mkTxp(cur, maxDbm) {
+            var inp = E('input', { 'type': 'number', 'min': '1', 'max': String(maxDbm),
+                'value': cur || '', 'placeholder': 'auto',
+                'style': 'background:#1a1a2e;border:1px solid #444;border-radius:4px;' +
+                         'color:#fff;padding:4px 8px;font-size:12px;width:80px' });
+            var wrap = E('div', { 'style': 'display:flex;align-items:center;gap:8px' }, [
+                inp,
+                E('span', { 'style': 'font-size:11px;color:#666' },
+                    'dBm  (1-' + maxDbm + ', empty = regulatory max)')
+            ]);
+            wrap._inp = inp;
+            return wrap;
+        }
+        var r0txp = mkTxp(r0['txpower'], 20);
+        var r1txp = mkTxp(r1['txpower'], 23);
+        var r2txp = mkTxp(r2['txpower'], 23);
+
         var countrySel = mkSel(countries, r0['country'] || 'CZ', '120px');
         var skuInput = E('input', { 'type': 'number', 'min': '0', 'max': '99',
             'value': r0['sku_idx'] || '0',
@@ -770,6 +788,9 @@ return view.extend({
             r2dis.checked = r2['disabled'] === '1'; r2lpi.checked = r2['lpi_enable'] === '1';
             r2noscan.checked = r2['noscan'] === '1';
             countrySel.value = r0['country'] || 'CZ'; skuInput.value = r0['sku_idx'] || '0';
+            r0txp._inp.value = r0['txpower'] || '';
+            r1txp._inp.value = r1['txpower'] || '';
+            r2txp._inp.value = r2['txpower'] || '';
             updateDfs();
         });
 
@@ -794,25 +815,25 @@ return view.extend({
             var country = countrySel.value;
             var skuIdx  = skuInput.value || '0';
             Promise.all([
-                L.resolveDefault(callUciSet('wireless', 'radio0', {
+                L.resolveDefault(callUciSet('wireless', 'radio0', Object.assign({
                     channel: r0ch.value, htmode: r0ht.value,
                     disabled: r0dis.checked ? '1' : '0',
                     noscan: r0noscan.checked ? '1' : '0',
                     country: country, sku_idx: skuIdx
-                }), null),
-                L.resolveDefault(callUciSet('wireless', 'radio1', {
+                }, r0txp._inp.value ? { txpower: r0txp._inp.value } : {})), null),
+                L.resolveDefault(callUciSet('wireless', 'radio1', Object.assign({
                     channel: r1ch.value, htmode: r1ht.value,
                     disabled: r1dis.checked ? '1' : '0',
                     background_radar: r1bgr.checked ? '1' : '0',
                     country: country, sku_idx: skuIdx
-                }), null),
-                L.resolveDefault(callUciSet('wireless', 'radio2', {
+                }, r1txp._inp.value ? { txpower: r1txp._inp.value } : {})), null),
+                L.resolveDefault(callUciSet('wireless', 'radio2', Object.assign({
                     channel: r2ch.value, htmode: r2ht.value,
                     disabled: r2dis.checked ? '1' : '0',
                     lpi_enable: r2lpi.checked ? '1' : '0',
                     noscan: r2noscan.checked ? '1' : '0',
                     country: country, sku_idx: skuIdx
-                }), null)
+                }, r2txp._inp.value ? { txpower: r2txp._inp.value } : {})), null)
             ]).then(function() {
                 return L.resolveDefault(callUciCommit('wireless'), null);
             }).then(function() {
@@ -856,16 +877,19 @@ return view.extend({
             ])),
             radioCard('2.4 GHz -- radio0', '#0a2a1a', '#5dcaa5', [
                 fieldRow('Channel', r0ch), fieldRow('HT mode', r0ht),
+                fieldRow('TX power', r0txp),
                 chkRow('Disabled', r0dis, ''),
                 chkRow('noscan', r0noscan, 'skip channel survey on start')
             ]),
             radioCard('5 GHz -- radio1', '#0a1a3a', '#85b7eb', [
                 fieldRow('Channel', r1chWrap), fieldRow('HT mode', r1ht),
+                fieldRow('TX power', r1txp),
                 chkRow('Disabled', r1dis, ''),
                 chkRow('background_radar', r1bgr, 'CAC in background -- keeps AP up during DFS')
             ]),
             radioCard('6 GHz -- radio2', '#1a0a3a', '#afa9ec', [
                 fieldRow('Channel', r2ch), fieldRow('HT mode', r2ht),
+                fieldRow('TX power', r2txp),
                 chkRow('Disabled', r2dis, ''),
                 chkRow('lpi_enable', r2lpi, 'Low Power Indoor -- required in some countries'),
                 chkRow('noscan', r2noscan, '6G: normally 0 (PSC channels)')
