@@ -213,6 +213,15 @@ return view.extend({
             L.resolveDefault(callExec('/usr/sbin/iw', [
                 'dev', 'ap-mld-1', 'station', 'dump'
             ]), { stdout: '' }),
+            L.resolveDefault(callExec('/usr/sbin/iw', [
+                'dev', 'phy0.0-ap0', 'station', 'dump'
+            ]), { stdout: '' }),
+            L.resolveDefault(callExec('/usr/sbin/iw', [
+                'dev', 'phy0.1-ap0', 'station', 'dump'
+            ]), { stdout: '' }),
+            L.resolveDefault(callExec('/usr/sbin/iw', [
+                'dev', 'phy0.2-ap0', 'station', 'dump'
+            ]), { stdout: '' }),
             L.resolveDefault(callExec('/bin/cat', [
                 '/sys/kernel/debug/ieee80211/phy0/mt76/fw_version'
             ]), { stdout: '' }),
@@ -305,7 +314,11 @@ return view.extend({
 
         this.switchTab(this.activeTab, container, data);
 
+        // Only auto-refresh on read-only tabs -- never refresh edit tabs
+        var readOnlyTabs = { 'overview': true, 'stations': true, 'diagnostics': true };
+
         poll.add(L.bind(function() {
+            if (!readOnlyTabs[self.activeTab]) return Promise.resolve();
             return this.loadData().then(L.bind(function(newData) {
                 data = newData;
                 self.switchTab(self.activeTab, container, newData);
@@ -447,6 +460,14 @@ return view.extend({
             'style': 'background:#1a1a2e;border:1px solid #444;border-radius:4px;' +
                      'color:#fff;padding:4px 8px;font-size:12px;width:220px'
         });
+        var keyToggleMld = E('button', { 'style':
+            'background:#2a2a3a;color:#aaa;border:1px solid #444;border-radius:4px;' +
+            'padding:4px 8px;font-size:11px;cursor:pointer;margin-left:6px' }, 'Show');
+        keyToggleMld.addEventListener('click', function() {
+            if (keyInput.type === 'password') { keyInput.type = 'text'; keyToggleMld.textContent = 'Hide'; }
+            else { keyInput.type = 'password'; keyToggleMld.textContent = 'Show'; }
+        });
+        var keyWrapMld = E('div', { 'style': 'display:flex;align-items:center' }, [keyInput, keyToggleMld]);
 
         var encSel = E('select', { 'style':
             'background:#1a1a2e;border:1px solid #444;border-radius:4px;' +
@@ -583,7 +604,7 @@ return view.extend({
             sectionBox('ap_mld_1 -- network configuration', '#1d9e75', null,
                 E('div', {}, [
                     fieldRow('SSID',             ssidInput),
-                    fieldRow('Password',         keyInput),
+                    fieldRow('Password',         keyWrapMld),
                     fieldRow('Encryption',       encSel),
                     fieldRow('RSNO layer',       rsnoSel),
                     fieldRow('PMF (ieee80211w)', roValue('required (=2) -- enforced for MLD')),
@@ -649,12 +670,18 @@ return view.extend({
     renderRadio: function(data) {
         var uciData = data[0];
         var radios  = {};
+        var ifaces  = {};
         Object.keys(uciData).forEach(function(sid) {
             if (uciData[sid]['.type'] === 'wifi-device') radios[sid] = uciData[sid];
+            if (uciData[sid]['.type'] === 'wifi-iface' && uciData[sid]['mlo'] !== '1' && uciData[sid]['mode'] === 'ap')
+                ifaces[uciData[sid]['device']] = uciData[sid];
         });
         var r0 = radios['radio0'] || {};
         var r1 = radios['radio1'] || {};
         var r2 = radios['radio2'] || {};
+        var i0 = ifaces['radio0'] || {};
+        var i1 = ifaces['radio1'] || {};
+        var i2 = ifaces['radio2'] || {};
         var ch2g = ['1','2','3','4','5','6','7','8','9','10','11','12','13','auto'];
         var ch5g = ['36','40','44','48','52','56','60','64','100','104','108','112',
                     '116','120','124','128','132','136','140','144','149','153','157','161','165','auto'];
@@ -758,17 +785,30 @@ return view.extend({
                 pstat.textContent=steps[si][1];si++;if(si<steps.length)setTimeout(nextStep,600);}
             nextStep();
             var country=countrySel.value, skuIdx=skuInput.value||'0';
+            // vif_txpower goes to iface, not device -- find iface sids
+            var i0sid='', i1sid='', i2sid='';
+            Object.keys(uciData).forEach(function(sid) {
+                var s=uciData[sid];
+                if(s['.type']==='wifi-iface'&&s['mlo']!=='1'&&s['mode']==='ap') {
+                    if(s['device']==='radio0') i0sid=sid;
+                    if(s['device']==='radio1') i1sid=sid;
+                    if(s['device']==='radio2') i2sid=sid;
+                }
+            });
+            var txpWrites = [];
+            if(r0txp._inp.value && i0sid) txpWrites.push(L.resolveDefault(callUciSet('wireless',i0sid,{vif_txpower:r0txp._inp.value}),null));
+            if(r1txp._inp.value && i1sid) txpWrites.push(L.resolveDefault(callUciSet('wireless',i1sid,{vif_txpower:r1txp._inp.value}),null));
+            if(r2txp._inp.value && i2sid) txpWrites.push(L.resolveDefault(callUciSet('wireless',i2sid,{vif_txpower:r2txp._inp.value}),null));
             Promise.all([
-                L.resolveDefault(callUciSet('wireless','radio0',Object.assign({channel:r0ch.value,htmode:r0ht.value,
-                    disabled:r0dis.checked?'1':'0',noscan:r0noscan.checked?'1':'0',country:country,sku_idx:skuIdx},
-                    r0txp._inp.value?{txpower:r0txp._inp.value}:{})),null),
-                L.resolveDefault(callUciSet('wireless','radio1',Object.assign({channel:r1ch.value,htmode:r1ht.value,
-                    disabled:r1dis.checked?'1':'0',background_radar:r1bgr.checked?'1':'0',country:country,sku_idx:skuIdx},
-                    r1txp._inp.value?{txpower:r1txp._inp.value}:{})),null),
-                L.resolveDefault(callUciSet('wireless','radio2',Object.assign({channel:r2ch.value,htmode:r2ht.value,
+                L.resolveDefault(callUciSet('wireless','radio0',{channel:r0ch.value,htmode:r0ht.value,
+                    disabled:r0dis.checked?'1':'0',noscan:r0noscan.checked?'1':'0',country:country,sku_idx:skuIdx}),null),
+                L.resolveDefault(callUciSet('wireless','radio1',{channel:r1ch.value,htmode:r1ht.value,
+                    disabled:r1dis.checked?'1':'0',background_radar:r1bgr.checked?'1':'0',country:country,sku_idx:skuIdx}),null),
+                L.resolveDefault(callUciSet('wireless','radio2',{channel:r2ch.value,htmode:r2ht.value,
                     disabled:r2dis.checked?'1':'0',lpi_enable:r2lpi.checked?'1':'0',noscan:r2noscan.checked?'1':'0',
-                    country:country,sku_idx:skuIdx},r2txp._inp.value?{txpower:r2txp._inp.value}:{})),null)
-            ]).then(function(){return L.resolveDefault(callUciCommit('wireless'),null);})
+                    country:country,sku_idx:skuIdx}),null)
+            ].concat(txpWrites)
+            ).then(function(){return L.resolveDefault(callUciCommit('wireless'),null);})
             .then(function(){return callExec('/sbin/wifi',[]);})
             .then(function(){
                 var tries=0,maxTries=60;
@@ -851,6 +891,14 @@ return view.extend({
                 'style': inputStyle });
             var keyInp  = E('input', { 'type': 'password', 'value': s['key'] || '',
                 'style': inputStyle });
+            var keyToggleLeg = E('button', { 'style':
+                'background:#2a2a3a;color:#aaa;border:1px solid #444;border-radius:4px;' +
+                'padding:4px 8px;font-size:11px;cursor:pointer;margin-left:6px' }, 'Show');
+            keyToggleLeg.addEventListener('click', function() {
+                if (keyInp.type === 'password') { keyInp.type = 'text'; keyToggleLeg.textContent = 'Hide'; }
+                else { keyInp.type = 'password'; keyToggleLeg.textContent = 'Show'; }
+            });
+            var keyInpWrap = E('div', { 'style': 'display:flex;align-items:center' }, [keyInp, keyToggleLeg]);
 
             // Encryption options -- 6G: no open allowed
             var encOpts = is6g
@@ -934,7 +982,7 @@ return view.extend({
 
             // Wrap keyRow in a div so we can show/hide it cleanly
             var keyWrap = E('div', {});
-            keyWrap.appendChild(fieldRow('Password', keyInp));
+            keyWrap.appendChild(fieldRow('Password', keyInpWrap));
 
             function applyKeyVis() {
                 keyWrap.style.display = encSel.value === 'none' ? 'none' : '';
@@ -1050,6 +1098,8 @@ return view.extend({
                 E('div', {}, linkEls)
             ]);
         });
+
+
         var legacyTotal = 0;
         var legacySections = legacyBands.map(function(b) {
             var stas = parseLegacyDump(data[b.idx] ? (data[b.idx].stdout || '') : '');
@@ -1069,10 +1119,10 @@ return view.extend({
 
         renderDiagnostics: function(data) {
         var skuRaw = data[2].stdout  ? data[2].stdout.trim()  : '?';
-        var fwRaw  = data[7].stdout  ? data[7].stdout.trim()  : '?';
-        var tp0    = data[8].stdout  || '';
-        var tp1    = data[9].stdout  || '';
-        var tp2    = data[10].stdout || '';
+        var fwRaw  = data[10].stdout ? data[10].stdout.trim() : '?';
+        var tp0    = data[11].stdout || '';
+        var tp1    = data[12].stdout || '';
+        var tp2    = data[13].stdout || '';
 
         var skuBad = skuRaw === '1';
 
