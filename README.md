@@ -1,73 +1,105 @@
 # luci-app-wifi7
 
-LuCI module for WiFi 7 (MT7996 / BPI-R4) — Network > WiFi 7
+**⚠️ ALPHA / BETA — Work in progress. Feedback welcome!**
 
-Custom LuCI view for managing the MT7996 tri-band WiFi 7 radio on the Banana Pi BPI-R4
-(MediaTek MT7988A / Filogic 880). Requires a custom OpenWrt build with MT7996 support
-and MLD (Multi-Link Device) hostapd.
+LuCI module for WiFi 7 (MT7996 / BPI-R4) — adds **Network > WiFi 7** to your OpenWrt interface.
 
 ## Hardware
 
-- Board: Banana Pi BPI-R4 (MT7988A)
-- WiFi chip: MT7996 (WiFi 7 / EHT, tri-band)
+- Board: **Banana Pi BPI-R4** (MediaTek MT7988A / Filogic 880)
+- WiFi chip: **MT7996** (WiFi 7 / EHT, tri-band 2.4G + 5G + 6G)
 - Tested on: OpenWrt 25.12-SNAPSHOT, LuCI 26.118.65222~15aabe7
 
 ## Features
 
-| Tab | Status | Description |
-|-----|--------|-------------|
-| Overview | Working | SKU banner, 3 MLD link cards with live data, legacy networks list, 10s auto-refresh |
-| MLD config | Working | SSID/password/encryption edit, Save & apply with progress bar + hostapd polling |
-| Radio | Working | Channel/htmode per radio, country+sku_idx (paired), DFS labels, lpi_enable, background_radar |
-| Stations | Working | MLD clients (ap_mld_1) + legacy clients (phy0.0/1/2-ap0), 10s auto-refresh |
-| Legacy networks | Placeholder | Coming soon |
-| Diagnostics | Working | fw_version, sku_disable, txpower_info band0/1/2 |
+| Tab | Description |
+|-----|-------------|
+| **Overview** | Live MLD link cards (channel, bandwidth, TX power, utilization), legacy networks list, SKU regulation status |
+| **MLD config** | Edit MLD SSID, password, encryption. MLO enable/disable. Per-link TX power info |
+| **Radio** | Channel, HT mode, TX power per radio. Country + sku_idx (paired). DFS labels, lpi_enable, background_radar |
+| **Networks** | Add/Remove legacy networks with smart defaults. Advanced settings (encryption, HT mode) |
+| **Stations** | Live client list — MLD clients (ap_mld_1) + legacy clients per band. WiFi mode badges (BE/AX/AC/N/G) |
+| **Diagnostics** | Firmware version, SKU status, TX power tables (band0/1/2), per-link current TX, DFS status, MAT table |
 
 ## Installation
 
-No build step required — plain JS files.
+### Quick install (pre-built APK)
 
-### Manual deploy
+Download the latest APK from [Releases](https://github.com/woziwrt/luci-app-wifi7/releases) and install:
 
 ```bash
-# From repo root
-scp files/www/luci-static/resources/view/wifi7/index.js root@192.168.1.1:/www/luci-static/resources/view/wifi7/
-scp files/usr/share/luci/menu.d/luci-app-wifi7.json root@192.168.1.1:/usr/share/luci/menu.d/
-scp files/usr/share/rpcd/acl.d/luci-app-wifi7.json root@192.168.1.1:/usr/share/rpcd/acl.d/
+# Copy APK to router
+scp luci-app-wifi7-*.apk root@192.168.1.1:/tmp/
 
-# Restart rpcd (required after ACL change)
-ssh root@192.168.1.1 /etc/init.d/rpcd restart
+# Install
+ssh root@192.168.1.1 "apk add --allow-untrusted /tmp/luci-app-wifi7-*.apk && /etc/init.d/rpcd restart"
 ```
 
-After JS-only changes (index.js): Ctrl+F5 in browser, no rpcd restart needed.
+Then open **Network > WiFi 7** in LuCI. If the menu doesn't appear, do a hard reload (Ctrl+Shift+R).
 
-### As OpenWrt package
+### Manual deploy (from source)
 
-Copy `files/` contents to your OpenWrt build tree or use as a feed package.
+```bash
+# Clone
+git clone https://github.com/woziwrt/luci-app-wifi7.git
+cd luci-app-wifi7/luci-app-wifi7
 
-## Data sources
+# Deploy files
+scp root/www/luci-static/resources/view/wifi7/index.js \
+    root@192.168.1.1:/www/luci-static/resources/view/wifi7/
 
-| Data | Source |
-|------|--------|
-| UCI wireless config | uci get config=wireless |
-| hostapd MLD status | hostapd.ap-mld-1 get_status |
-| SKU regulation | /sys/kernel/debug/ieee80211/phy0/mt76/sku_disable |
-| FW version | /sys/kernel/debug/ieee80211/phy0/mt76/fw_version |
-| Per-link stats | hostapd_cli -i ap-mld-1 -l {0,1,2} stat |
-| MLD station dump | iw dev ap-mld-1 station dump |
-| Legacy station dump | iw dev phy0.{0,1,2}-ap0 station dump |
-| TX power info | /sys/kernel/debug/ieee80211/phy0/mt76/band{0,1,2}/txpower_info |
+scp root/usr/share/luci/menu.d/luci-app-wifi7.json \
+    root@192.168.1.1:/usr/share/luci/menu.d/
 
-## Known hardware specifics (MT7996 / BPI-R4)
+scp root/usr/share/rpcd/acl.d/luci-app-wifi7.json \
+    root@192.168.1.1:/usr/share/rpcd/acl.d/
 
-- `eht_oper_chwidth=9` means 160 MHz (MTK-specific value, not in IEEE standard map)
-- iPhone connects via MLD but uses only Link 2 (6G) for heavy traffic — Links 0/1 show signal=0 dBm (normal STR behavior)
-- `mongo:4.4.18` is the only MongoDB version compatible with MT7988A (ARMv8.0)
-- Country change requires full reboot — `wifi restart` is not sufficient
+# Restart rpcd (required after ACL change)
+ssh root@192.168.1.1 "/etc/init.d/rpcd restart"
+```
 
-## Project
+### Build from source (OpenWrt build system)
 
-Part of the [woziwrt](https://github.com/woziwrt) BPI-R4 OpenWrt project.
+```bash
+cd /your/openwrt/build/dir
+
+# Copy into luci feed
+cp -r /path/to/luci-app-wifi7/luci-app-wifi7 feeds/luci/applications/luci-app-wifi7
+ln -s ../../../feeds/luci/applications/luci-app-wifi7 package/feeds/luci/luci-app-wifi7
+echo "CONFIG_PACKAGE_luci-app-wifi7=m" >> .config
+
+# Build
+make package/feeds/luci/luci-app-wifi7/{clean,compile} V=s
+
+# APK: bin/packages/aarch64_cortex-a53/luci/luci-app-wifi7-0.apk
+```
+
+## Known issues & limitations (alpha)
+
+- **MLD only on MT7996** — This module is specifically designed for the MT7996 tri-band chip on BPI-R4. It will not work on other hardware without modification.
+- **wifi up required** — After reboot, run `wifi up` before the module shows live data.
+- **APK version shows "0"** — Will be fixed in future release with proper versioning.
+- **No signal/noise ratio** — Coming in v2.
+- **MLD network management** — Currently only one MLD network (ap_mld_1) is supported. Adding new MLD networks is planned for v2.
+
+## Feedback & bug reports
+
+This is an **alpha/beta release**. Please report issues, suggestions and feedback:
+
+- **GitHub Issues**: [github.com/woziwrt/luci-app-wifi7/issues](https://github.com/woziwrt/luci-app-wifi7/issues)
+- **OpenWrt Forum**: [BPI-R4 MTK-SDK thread](https://forum.openwrt.org/t/banana-bpi-r4-all-related-to-mtk-sdk/221080)
+
+Especially interested in feedback on:
+- Does it work on your BPI-R4?
+- What features are missing?
+- What doesn't work as expected?
+- UI/UX suggestions
+
+## Related projects
 
 - Build system: [woziwrt/bpi-r4-deploy](https://github.com/woziwrt/bpi-r4-deploy)
 - UniFi stack: [woziwrt/bpi-r4-unifi](https://github.com/woziwrt/bpi-r4-unifi)
+
+## License
+
+Apache-2.0
