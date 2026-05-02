@@ -310,7 +310,7 @@ return view.extend({
             { id: 'overview',    label: 'Overview' },
             { id: 'mld',         label: 'MLD config' },
             { id: 'radio',       label: 'Radio' },
-            { id: 'legacy',      label: 'Legacy networks' },
+            { id: 'legacy',      label: 'Networks' },
             { id: 'stations',    label: 'Stations' },
             { id: 'diagnostics', label: 'Diagnostics' }
         ];
@@ -889,8 +889,6 @@ return view.extend({
 
     renderLegacy: function(data) {
         var uciData = data[0];
-
-        // Collect legacy wifi-iface sections (non-MLD, mode=ap)
         var bandMeta = {
             'radio0': { band: '2.4G', bg: '#0a2a1a', fg: '#5dcaa5' },
             'radio1': { band: '5G',   bg: '#0a1a3a', fg: '#85b7eb' },
@@ -899,183 +897,368 @@ return view.extend({
         var legacyIfaces = [];
         Object.keys(uciData).sort().forEach(function(sid) {
             var s = uciData[sid];
-            if (s['.type'] === 'wifi-iface' && s['mlo'] !== '1' && s['mode'] === 'ap') {
-                var meta = bandMeta[s['device']] || { band: s['device'], bg: '#222', fg: '#aaa' };
-                legacyIfaces.push({ sid: sid, s: s, meta: meta });
+            if (s['.type']==='wifi-iface' && s['mlo']!=='1' && s['mode']==='ap') {
+                var meta = bandMeta[s['device']] || { band: s['device'], bg:'#222', fg:'#aaa' };
+                legacyIfaces.push({ sid:sid, s:s, meta:meta });
             }
         });
 
-        var callUciSet = rpc.declare({
-            object: 'uci', method: 'set',
-            params: ['config', 'section', 'values'], expect: {}
-        });
-        var callUciCommit = rpc.declare({
-            object: 'uci', method: 'commit',
-            params: ['config'], expect: {}
-        });
+        var callUciSet = rpc.declare({ object:'uci', method:'set',
+            params:['config','section','values'], expect:{} });
+        var callUciCommit = rpc.declare({ object:'uci', method:'commit',
+            params:['config'], expect:{} });
+        var callUciAdd = rpc.declare({ object:'uci', method:'add',
+            params:['config','type'], expect:{ section:'' } });
+        var callUciDelete = rpc.declare({ object:'uci', method:'delete',
+            params:['config','section'], expect:{} });
 
         var inputStyle = 'background:#1a1a2e;border:1px solid #444;border-radius:4px;' +
                          'color:#fff;padding:4px 8px;font-size:12px;width:220px';
-        var selStyle   = inputStyle;
 
-        // Build a card per interface
-        var cards = legacyIfaces.map(function(ifc) {
-            var sid  = ifc.sid;
-            var s    = ifc.s;
-            var meta = ifc.meta;
-            var is6g = s['device'] === 'radio2';
+        var container = E('div', {});
 
-            var ssidInp = E('input', { 'type': 'text', 'value': s['ssid'] || '',
+        function rebuildCards() {
+            while (container.firstChild) container.removeChild(container.firstChild);
+
+            // Add network button
+            var addBtn = E('button', { 'style':
+                'background:#185fa5;color:#fff;border:none;border-radius:4px;' +
+                'padding:7px 18px;font-size:13px;cursor:pointer;margin-bottom:14px' },
+                '+ Add network');
+
+            // Add network dialog (hidden initially)
+            var dialog = E('div', { 'style': 'display:none' });
+
+            addBtn.addEventListener('click', function() {
+                addBtn.style.display = 'none';
+                dialog.style.display = '';
+            });
+
+            // Dialog fields
+            var newSSID = E('input', { 'type':'text', 'placeholder':'My Network',
                 'style': inputStyle });
-            var keyInp  = E('input', { 'type': 'password', 'value': s['key'] || '',
+            var newBand = E('select', { 'style':
+                'background:#1a1a2e;border:1px solid #444;border-radius:4px;' +
+                'color:#fff;padding:4px 8px;font-size:12px;width:120px' });
+            [['radio0','2.4 GHz'],['radio1','5 GHz'],['radio2','6 GHz']].forEach(function(o) {
+                var opt = E('option', { 'value': o[0] }); opt.textContent = o[1];
+                newBand.appendChild(opt);
+            });
+            var newKey = E('input', { 'type':'password', 'placeholder':'min 8 characters',
                 'style': inputStyle });
-            var keyToggleLeg = E('button', { 'style':
+            var newKeyToggle = E('button', { 'style':
                 'background:#2a2a3a;color:#aaa;border:1px solid #444;border-radius:4px;' +
                 'padding:4px 8px;font-size:11px;cursor:pointer;margin-left:6px' }, 'Show');
-            keyToggleLeg.addEventListener('click', function() {
-                if (keyInp.type === 'password') { keyInp.type = 'text'; keyToggleLeg.textContent = 'Hide'; }
-                else { keyInp.type = 'password'; keyToggleLeg.textContent = 'Show'; }
-            });
-            var keyInpWrap = E('div', { 'style': 'display:flex;align-items:center' }, [keyInp, keyToggleLeg]);
-
-            // Encryption options -- 6G: no open allowed
-            var encOpts = is6g
-                ? [['sae',       'WPA3-SAE (required on 6 GHz)'],
-                   ['sae-mixed', 'WPA2/WPA3 mixed']]
-                : [['none',      'Open (no password)'],
-                   ['psk2',      'WPA2-PSK'],
-                   ['psk-mixed', 'WPA/WPA2 mixed'],
-                   ['sae-mixed', 'WPA2/WPA3 mixed'],
-                   ['sae',       'WPA3-SAE']];
-
-            var encSel = E('select', { 'style': selStyle });
-            encOpts.forEach(function(o) {
-                var opt = E('option', { 'value': o[0] });
-                opt.textContent = o[1];
-                if ((s['encryption'] || 'none') === o[0]) opt.selected = true;
-                encSel.appendChild(opt);
+            newKeyToggle.addEventListener('click', function() {
+                newKey.type = newKey.type === 'password' ? 'text' : 'password';
+                newKeyToggle.textContent = newKey.type === 'password' ? 'Show' : 'Hide';
             });
 
-            // Show/hide password field -- handled by applyKeyVis below
+            // Advanced settings (collapsed by default)
+            var advVisible = false;
+            var advToggle = E('div', { 'style':
+                'font-size:12px;color:#85b7eb;cursor:pointer;margin:8px 0;' +
+                'display:flex;align-items:center;gap:6px;user-select:none' });
+            var advArrow = E('span', {}, '▶');
+            advToggle.appendChild(advArrow);
+            advToggle.appendChild(E('span', {}, ' Advanced settings'));
 
-            var disChk = E('input', { 'type': 'checkbox',
-                'checked': s['disabled'] === '1' ? true : null,
-                'style': 'width:16px;height:16px;cursor:pointer' });
-
-            var statusSpan = E('span', { 'style': 'font-size:11px;color:#888;margin-left:8px' });
-
-            var applyBtn  = E('button', { 'style':
-                'background:#185fa5;color:#fff;border:none;border-radius:4px;' +
-                'padding:5px 14px;font-size:12px;cursor:pointer' }, 'Save & apply');
-            var discardBtn = E('button', { 'style':
-                'background:#2a2a3a;color:#aaa;border:1px solid #444;border-radius:4px;' +
-                'padding:5px 14px;font-size:12px;cursor:pointer;margin-right:8px' }, 'Discard');
-
-            discardBtn.addEventListener('click', function() {
-                ssidInp.value    = s['ssid'] || '';
-                keyInp.value     = s['key']  || '';
-                disChk.checked   = s['disabled'] === '1';
-                // reset encryption select
-                Array.prototype.forEach.call(encSel.options, function(o) {
-                    o.selected = o.value === (s['encryption'] || 'none');
+            // Encryption select for advanced
+            var newEnc = E('select', { 'style':
+                'background:#1a1a2e;border:1px solid #444;border-radius:4px;' +
+                'color:#fff;padding:4px 8px;font-size:12px;width:220px' });
+            function updateEncOpts() {
+                while (newEnc.firstChild) newEnc.removeChild(newEnc.firstChild);
+                var opts = newBand.value === 'radio2'
+                    ? [['sae','WPA3-SAE (required on 6 GHz)'],['sae-mixed','WPA2/WPA3 mixed']]
+                    : [['psk2','WPA2-PSK (recommended)'],['psk-mixed','WPA/WPA2 mixed'],
+                       ['sae-mixed','WPA2/WPA3 mixed'],['sae','WPA3-SAE'],['none','Open (no password)']];
+                opts.forEach(function(o) {
+                    var opt = E('option',{'value':o[0]}); opt.textContent = o[1];
+                    newEnc.appendChild(opt);
                 });
-                applyKeyVis();
-                statusSpan.textContent = '';
+                // hide key if open
+                newKey.parentNode && (newKey.parentNode.style.display =
+                    newEnc.value === 'none' ? 'none' : '');
+            }
+            newBand.addEventListener('change', updateEncOpts);
+            newEnc.addEventListener('change', function() {
+                newKey.parentNode && (newKey.parentNode.style.display =
+                    newEnc.value === 'none' ? 'none' : '');
+            });
+            updateEncOpts();
+
+            // htmode select
+            var htOpts = {
+                'radio0': ['EHT40','EHT20','HE40','HE20','HT40','HT20'],
+                'radio1': ['EHT160','EHT80','EHT40','HE160','HE80','VHT160','VHT80'],
+                'radio2': ['EHT320','EHT160','EHT80','HE160','HE80']
+            };
+            var newHt = E('select', { 'style':
+                'background:#1a1a2e;border:1px solid #444;border-radius:4px;' +
+                'color:#fff;padding:4px 8px;font-size:12px;width:220px' });
+            function updateHtOpts() {
+                while (newHt.firstChild) newHt.removeChild(newHt.firstChild);
+                (htOpts[newBand.value] || ['auto']).forEach(function(o) {
+                    var opt = E('option',{'value':o}); opt.textContent = o;
+                    newHt.appendChild(opt);
+                });
+            }
+            newBand.addEventListener('change', updateHtOpts);
+            updateHtOpts();
+
+            var advBox = E('div', { 'style': 'display:none;border:1px solid #2a2a3a;' +
+                'border-radius:4px;padding:10px;margin:6px 0;background:#0d0d1a' });
+            advBox.appendChild(fieldRow('Encryption', newEnc));
+            advBox.appendChild(fieldRow('HT mode', newHt));
+
+            advToggle.addEventListener('click', function() {
+                advVisible = !advVisible;
+                advBox.style.display = advVisible ? '' : 'none';
+                advArrow.textContent = advVisible ? '▼' : '▶';
             });
 
-            applyBtn.addEventListener('click', function() {
-                var newSSID = ssidInp.value.trim();
-                var newEnc  = encSel.value;
-                var newKey  = keyInp.value;
-                if (!newSSID) { alert('SSID cannot be empty'); return; }
-                if (newEnc !== 'none' && newKey.length < 8) {
+            var keyWrapNew = E('div', { 'style': 'display:flex;align-items:center' },
+                [newKey, newKeyToggle]);
+
+            var addStatusSpan = E('span', { 'style': 'font-size:11px;margin-left:8px' });
+            var confirmBtn = E('button', { 'style':
+                'background:#185fa5;color:#fff;border:none;border-radius:4px;' +
+                'padding:5px 14px;font-size:12px;cursor:pointer' }, 'Add network');
+            var cancelBtn = E('button', { 'style':
+                'background:#2a2a3a;color:#aaa;border:1px solid #444;border-radius:4px;' +
+                'padding:5px 14px;font-size:12px;cursor:pointer;margin-right:8px' }, 'Cancel');
+
+            cancelBtn.addEventListener('click', function() {
+                dialog.style.display = 'none';
+                addBtn.style.display = '';
+                newSSID.value = ''; newKey.value = '';
+            });
+
+            confirmBtn.addEventListener('click', function() {
+                var ssid = newSSID.value.trim();
+                var enc  = newEnc.value;
+                var key  = newKey.value;
+                var dev  = newBand.value;
+                var ht   = newHt.value;
+                if (!ssid) { alert('SSID cannot be empty'); return; }
+                if (enc !== 'none' && key.length < 8) {
                     alert('Password must be at least 8 characters'); return; }
-                if (is6g && newEnc === 'none') {
-                    alert('Open network not allowed on 6 GHz -- hostapd will reject it'); return; }
+                if (dev === 'radio2' && enc === 'none') {
+                    alert('Open network not allowed on 6 GHz'); return; }
 
-                applyBtn.disabled  = true;
-                discardBtn.disabled = true;
-                statusSpan.textContent = 'Writing UCI...';
-                statusSpan.style.color = '#f5a623';
+                confirmBtn.disabled = true; cancelBtn.disabled = true;
+                addStatusSpan.textContent = 'Creating...';
+                addStatusSpan.style.color = '#f5a623';
 
-                var vals = { ssid: newSSID, encryption: newEnc,
-                             disabled: disChk.checked ? '1' : '0' };
-                if (newEnc !== 'none') vals.key = newKey;
+                // Generate section name: wifinet_<timestamp>
+                var newSid = 'wifinet_' + Math.floor(Date.now()/1000);
+                var vals = { device: dev, network: 'lan', mode: 'ap',
+                             ssid: ssid, encryption: enc, htmode: ht,
+                             disabled: '0', mbo: '0' };
+                if (enc !== 'none') vals.key = key;
+                // 6G extras
+                if (dev === 'radio2') {
+                    vals.sae_pwe = '2'; vals.ieee80211w = '2';
+                    if (enc === 'sae') vals.mbo = '1';
+                }
 
-                L.resolveDefault(callUciSet('wireless', sid, vals), null)
-                .then(function() {
-                    statusSpan.textContent = 'Committing...';
+                L.resolveDefault(callUciAdd('wireless', 'wifi-iface'), null)
+                .then(function(r) {
+                    var sid = (r && r.section) ? r.section : newSid;
+                    return L.resolveDefault(callUciSet('wireless', sid, vals), null)
+                        .then(function() { return sid; });
+                }).then(function() {
+                    addStatusSpan.textContent = 'Committing...';
                     return L.resolveDefault(callUciCommit('wireless'), null);
                 }).then(function() {
-                    statusSpan.textContent = 'Running wifi restart...';
+                    addStatusSpan.textContent = 'Running wifi restart...';
                     return callExec('/sbin/wifi', []);
                 }).then(function() {
-                    statusSpan.textContent = 'Done';
-                    statusSpan.style.color = '#1d9e75';
-                    applyBtn.disabled  = false;
-                    discardBtn.disabled = false;
-                    setTimeout(function() { statusSpan.textContent = ''; }, 3000);
+                    addStatusSpan.textContent = 'Done';
+                    addStatusSpan.style.color = '#1d9e75';
+                    dialog.style.display = 'none';
+                    addBtn.style.display = '';
+                    newSSID.value = ''; newKey.value = '';
+                    confirmBtn.disabled = false; cancelBtn.disabled = false;
+                    setTimeout(function() { addStatusSpan.textContent = ''; }, 3000);
                 });
             });
 
-            // Wrap keyRow in a div so we can show/hide it cleanly
-            var keyWrap = E('div', {});
-            keyWrap.appendChild(fieldRow('Password', keyInpWrap));
+            var dialogInner = E('div', { 'style':
+                'border:1px solid #444;border-radius:6px;padding:14px;' +
+                'background:#1a1a2e;margin-bottom:14px' });
+            dialogInner.appendChild(E('div', { 'style':
+                'font-size:13px;font-weight:bold;margin-bottom:10px;color:#fff' },
+                'Add new network'));
+            dialogInner.appendChild(fieldRow('SSID', newSSID));
+            dialogInner.appendChild(fieldRow('Band', newBand));
+            dialogInner.appendChild(fieldRow('Password', keyWrapNew));
+            dialogInner.appendChild(advToggle);
+            dialogInner.appendChild(advBox);
+            dialogInner.appendChild(E('div', { 'style':
+                'display:flex;align-items:center;margin-top:10px' },
+                [cancelBtn, confirmBtn, addStatusSpan]));
+            dialog.appendChild(dialogInner);
 
-            function applyKeyVis() {
-                keyWrap.style.display = encSel.value === 'none' ? 'none' : '';
-            }
-            encSel.addEventListener('change', applyKeyVis);
-            applyKeyVis();
+            container.appendChild(addBtn);
+            container.appendChild(dialog);
 
-            var bodyRows = [
-                fieldRow('SSID', ssidInp),
-                fieldRow('Encryption', encSel),
-                keyWrap,
-                fieldRow('Disabled',
-                    E('div', { 'style': 'display:flex;align-items:center;gap:8px' }, [
-                        disChk,
-                        E('span', { 'style': 'font-size:11px;color:#666' },
-                            'disables this interface only')
-                    ])),
-                fieldRow('UCI section', roValue(sid + '  (device: ' + s['device'] + ')'))
-            ];
+            // Build existing network cards
+            legacyIfaces.forEach(function(ifc) {
+                var sid  = ifc.sid;
+                var s    = ifc.s;
+                var meta = ifc.meta;
+                var is6g = s['device'] === 'radio2';
 
-            return E('div', { 'style':
-                'border:1px solid #444;border-radius:6px;overflow:hidden;margin-bottom:10px' }, [
-                E('div', { 'style':
-                    'background:#16213e;padding:7px 12px;font-size:13px;font-weight:bold;' +
-                    'display:flex;align-items:center;gap:8px' }, [
-                    badge(meta.band, meta.bg, meta.fg),
-                    E('span', {}, s['ssid'] || sid),
-                    E('span', { 'style': 'font-size:11px;color:#666;margin-left:4px' },
-                        s['disabled'] === '1' ? '(disabled)' : '')
-                ]),
-                (function() {
-                    var bd = E('div', { 'style': 'padding:10px 12px' });
-                    bodyRows.forEach(function(r) { if (r) bd.appendChild(r); });
-                    return bd;
-                })(),
-                E('div', { 'style':
-                    'display:flex;justify-content:flex-end;align-items:center;' +
-                    'padding:8px 12px;border-top:1px solid #2a2a3a' }, [
-                    statusSpan, discardBtn, applyBtn
-                ])
-            ]);
-        });
+                var ssidInp = E('input', { 'type':'text', 'value':s['ssid']||'',
+                    'style':inputStyle });
+                var keyInp = E('input', { 'type':'password', 'value':s['key']||'',
+                    'style':inputStyle });
+                var keyToggleLeg = E('button', { 'style':
+                    'background:#2a2a3a;color:#aaa;border:1px solid #444;border-radius:4px;' +
+                    'padding:4px 8px;font-size:11px;cursor:pointer;margin-left:6px' }, 'Show');
+                keyToggleLeg.addEventListener('click', function() {
+                    keyInp.type = keyInp.type === 'password' ? 'text' : 'password';
+                    keyToggleLeg.textContent = keyInp.type === 'password' ? 'Show' : 'Hide';
+                });
+                var keyInpWrap = E('div', { 'style':'display:flex;align-items:center' },
+                    [keyInp, keyToggleLeg]);
+                var keyWrap = E('div', {});
+                keyWrap.appendChild(fieldRow('Password', keyInpWrap));
+
+                var encOpts = is6g
+                    ? [['sae','WPA3-SAE (required on 6 GHz)'],['sae-mixed','WPA2/WPA3 mixed']]
+                    : [['none','Open (no password)'],['psk2','WPA2-PSK'],
+                       ['psk-mixed','WPA/WPA2 mixed'],['sae-mixed','WPA2/WPA3 mixed'],
+                       ['sae','WPA3-SAE']];
+                var encSel = E('select', { 'style':inputStyle });
+                encOpts.forEach(function(o) {
+                    var opt = E('option',{'value':o[0]}); opt.textContent = o[1];
+                    if ((s['encryption']||'none') === o[0]) opt.selected = true;
+                    encSel.appendChild(opt);
+                });
+                var disChk = E('input', { 'type':'checkbox',
+                    'checked':s['disabled']==='1'?true:null,
+                    'style':'width:16px;height:16px;cursor:pointer' });
+                var statusSpan = E('span', { 'style':'font-size:11px;color:#888;margin-left:8px' });
+
+                function applyKeyVis() {
+                    keyWrap.style.display = encSel.value === 'none' ? 'none' : '';
+                }
+                encSel.addEventListener('change', applyKeyVis);
+                applyKeyVis();
+
+                var saveBtn = E('button', { 'style':
+                    'background:#185fa5;color:#fff;border:none;border-radius:4px;' +
+                    'padding:5px 14px;font-size:12px;cursor:pointer' }, 'Save & apply');
+                var discardBtn = E('button', { 'style':
+                    'background:#2a2a3a;color:#aaa;border:1px solid #444;border-radius:4px;' +
+                    'padding:5px 14px;font-size:12px;cursor:pointer;margin-right:8px' }, 'Discard');
+                var removeBtn = E('button', { 'style':
+                    'background:#3a0a0a;color:#f4a0a0;border:1px solid #e24b4a;' +
+                    'border-radius:4px;padding:5px 10px;font-size:11px;cursor:pointer;' +
+                    'margin-left:auto' }, 'Remove');
+
+                discardBtn.addEventListener('click', function() {
+                    ssidInp.value = s['ssid']||''; keyInp.value = s['key']||'';
+                    disChk.checked = s['disabled']==='1';
+                    Array.prototype.forEach.call(encSel.options, function(o) {
+                        o.selected = o.value === (s['encryption']||'none'); });
+                    applyKeyVis(); statusSpan.textContent = '';
+                });
+
+                saveBtn.addEventListener('click', function() {
+                    var newSSIDv = ssidInp.value.trim();
+                    var newEnc  = encSel.value;
+                    var newKey  = keyInp.value;
+                    if (!newSSIDv) { alert('SSID cannot be empty'); return; }
+                    if (newEnc !== 'none' && newKey.length < 8) {
+                        alert('Password must be at least 8 characters'); return; }
+                    saveBtn.disabled = true; discardBtn.disabled = true;
+                    statusSpan.textContent = 'Writing UCI...';
+                    statusSpan.style.color = '#f5a623';
+                    var vals = { ssid:newSSIDv, encryption:newEnc,
+                                 disabled:disChk.checked?'1':'0' };
+                    if (newEnc !== 'none') vals.key = newKey;
+                    L.resolveDefault(callUciSet('wireless', sid, vals), null)
+                    .then(function() {
+                        statusSpan.textContent = 'Committing...';
+                        return L.resolveDefault(callUciCommit('wireless'), null);
+                    }).then(function() {
+                        statusSpan.textContent = 'Running wifi restart...';
+                        return callExec('/sbin/wifi', []);
+                    }).then(function() {
+                        statusSpan.textContent = 'Done';
+                        statusSpan.style.color = '#1d9e75';
+                        saveBtn.disabled = false; discardBtn.disabled = false;
+                        setTimeout(function() { statusSpan.textContent = ''; }, 3000);
+                    });
+                });
+
+                removeBtn.addEventListener('click', function() {
+                    if (!confirm('Remove network "' + (s['ssid']||sid) + '"?\n' +
+                        'This will delete the UCI section and restart WiFi.')) return;
+                    removeBtn.disabled = true;
+                    statusSpan.textContent = 'Removing...';
+                    statusSpan.style.color = '#e24b4a';
+                    L.resolveDefault(callUciDelete('wireless', sid), null)
+                    .then(function() {
+                        return L.resolveDefault(callUciCommit('wireless'), null);
+                    }).then(function() {
+                        return callExec('/sbin/wifi', []);
+                    }).then(function() {
+                        statusSpan.textContent = 'Done -- removed';
+                        // Remove card from DOM
+                        var card = removeBtn.closest ? removeBtn.closest('.net-card') : null;
+                        if (card) card.parentNode.removeChild(card);
+                    });
+                });
+
+                var bodyRows = [
+                    fieldRow('SSID', ssidInp),
+                    fieldRow('Encryption', encSel),
+                    keyWrap,
+                    fieldRow('Disabled', E('div', { 'style':'display:flex;align-items:center;gap:8px' }, [
+                        disChk, E('span', {'style':'font-size:11px;color:#666'},
+                            'disables this interface only')])),
+                    fieldRow('UCI section', roValue(sid + '  (device: ' + s['device'] + ')'))
+                ];
+
+                var card = E('div', { 'class':'net-card', 'style':
+                    'border:1px solid #444;border-radius:6px;overflow:hidden;margin-bottom:10px' }, [
+                    E('div', { 'style':
+                        'background:#16213e;padding:7px 12px;font-size:13px;font-weight:bold;' +
+                        'display:flex;align-items:center;gap:8px' }, [
+                        badge(meta.band, meta.bg, meta.fg),
+                        E('span', {}, s['ssid']||sid),
+                        E('span', { 'style':'font-size:11px;color:#666;margin-left:4px' },
+                            s['disabled']==='1' ? '(disabled)' : '')
+                    ]),
+                    (function() {
+                        var bd = E('div', {'style':'padding:10px 12px'});
+                        bodyRows.forEach(function(r) { if(r) bd.appendChild(r); });
+                        return bd;
+                    })(),
+                    E('div', { 'style':
+                        'display:flex;align-items:center;padding:8px 12px;' +
+                        'border-top:1px solid #2a2a3a' }, [
+                        discardBtn, saveBtn, statusSpan, removeBtn
+                    ])
+                ]);
+                container.appendChild(card);
+            });
+        }
+
+        rebuildCards();
 
         return E('div', {}, [
-            infoBanner('Legacy networks are independent from MLD. ' +
-                'Open networks disable EHT (WiFi 7). ' +
-                'Open on 6 GHz is rejected by hostapd -- sae or sae-mixed required.'),
-            legacyIfaces.length
-                ? E('div', {}, cards)
-                : E('div', { 'style': 'font-size:12px;color:#888;padding:20px;text-align:center' },
-                    'No legacy networks configured.')
+            infoBanner('Legacy networks are independent from MLD. Open networks disable EHT (WiFi 7). Open on 6 GHz is rejected by hostapd.'),
+            container
         ]);
     },
 
-    renderStations: function(data) {
+        renderStations: function(data) {
         var mldStations = parseStationDump(data[6] ? (data[6].stdout || '') : '');
         var legacyBands = [
             { idx: 7,  name: '2.4G', iface: 'phy0.0-ap0', bg: '#0a2a1a', fg: '#5dcaa5' },
