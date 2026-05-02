@@ -129,6 +129,28 @@ function roValue(text) {
     return d;
 }
 
+function detectMode(bitrateStr) {
+    if (!bitrateStr) return '';
+    if (bitrateStr.indexOf('EHT') >= 0) return 'BE';
+    if (bitrateStr.indexOf('HE') >= 0)  return 'AX';
+    if (bitrateStr.indexOf('VHT') >= 0) return 'AC';
+    if (bitrateStr.indexOf('MCS') >= 0) return 'N';
+    return 'G/A';
+}
+
+function modeBadge(bitrateStr) {
+    var mode = detectMode(bitrateStr);
+    var colors = {
+        'BE':  ['#1a0a3a', '#afa9ec'],
+        'AX':  ['#0a1a3a', '#85b7eb'],
+        'AC':  ['#0a2a1a', '#5dcaa5'],
+        'N':   ['#2a2a0a', '#d4c46a'],
+        'G/A': ['#2a1a0a', '#f5a623']
+    };
+    var c = colors[mode] || ['#222', '#aaa'];
+    return mode ? badge('WiFi ' + mode, c[0], c[1]) : null;
+}
+
 function parseStationDump(raw) {
     var stations = [];
     var cur      = null;
@@ -1084,7 +1106,7 @@ return view.extend({
                     E('span', { 'style': 'font-family:monospace;font-size:12px;color:#fff' }, sta.mac),
                     sta.connected ? E('span', { 'style': 'color:#888;margin-left:8px' }, 'connected: ' + sta.connected) : '',
                     E('br'),
-                    (function() { var mb = modeBadge(sta.tx); return mb ? E('span', {}, [mb, ' ']) : ''; })(),
+                    (function() { var mb = modeBadge(sta.tx); if (!mb) return E('span',{}); var w=E('span',{'style':'margin-right:4px'}); w.appendChild(mb); return w; })(),
                     'signal: ' + (sta.signal || '?') + (sta.signal_arr ? ' ' + sta.signal_arr : '') + ' dBm' +
                     (sta.tx ? '  |  Tx: ' + sta.tx : '') + (sta.rx ? '  |  Rx: ' + sta.rx : '')
                 ])
@@ -1099,9 +1121,10 @@ return view.extend({
                 if (lk.idle) return E('div', { 'style': 'font-size:11px;margin-top:5px;color:#555;display:flex;align-items:center;gap:6px' },
                     [badge(name, bg, fg), E('span', {}, 'idle (STR)  |  peer: ' + lk.addr)]);
                 var mBadge = modeBadge(lk.tx);
+                var mBadgeEl = mBadge ? mBadge : E('span', {});
                 return E('div', { 'style': 'font-size:11px;margin-top:5px;color:#ccc;display:flex;align-items:flex-start;gap:6px' }, [
                     badge(name, bg, fg),
-                    mBadge || E('span', {}),
+                    mBadgeEl,
                     E('div', { 'style': 'line-height:1.8' }, [
                         'signal: ' + lk.signal + (lk.signal_arr ? ' ' + lk.signal_arr : '') + ' dBm',
                         E('br'), 'Tx: ' + lk.tx, E('br'), 'Rx: ' + lk.rx, E('br'), 'peer MAC: ' + lk.addr
