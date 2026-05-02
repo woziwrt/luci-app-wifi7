@@ -4,6 +4,12 @@
 
 LuCI module for WiFi 7 (MT7996 / BPI-R4) — adds **Network > WiFi 7** to your OpenWrt interface.
 
+## ⚠️ Requirements
+
+This module requires **OpenWrt with MTK SDK** (e.g. [woziwrt/bpi-r4-deploy](https://github.com/woziwrt/bpi-r4-deploy)).
+
+It is specifically designed for the MTK SDK WiFi stack and will **not work correctly** with mainline OpenWrt — the interface naming, MLD configuration and hostapd parameters differ significantly.
+
 ## Hardware
 
 - Board: **Banana Pi BPI-R4** (MediaTek MT7988A / Filogic 880)
