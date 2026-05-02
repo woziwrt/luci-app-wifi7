@@ -233,6 +233,21 @@ return view.extend({
             ]), { stdout: '' }),
             L.resolveDefault(callExec('/bin/cat', [
                 '/sys/kernel/debug/ieee80211/phy0/mt76/band2/txpower_info'
+            ]), { stdout: '' }),
+            L.resolveDefault(callExec('/bin/cat', [
+                '/sys/kernel/debug/ieee80211/phy0/mt76/mat_table'
+            ]), { stdout: '' }),
+            L.resolveDefault(callExec('/bin/cat', [
+                '/sys/kernel/debug/ieee80211/phy0/mt76/dfs_status'
+            ]), { stdout: '' }),
+            L.resolveDefault(callExec('/bin/cat', [
+                '/sys/kernel/debug/ieee80211/phy0/netdev:ap-mld-1/link-0/txpower'
+            ]), { stdout: '' }),
+            L.resolveDefault(callExec('/bin/cat', [
+                '/sys/kernel/debug/ieee80211/phy0/netdev:ap-mld-1/link-1/txpower'
+            ]), { stdout: '' }),
+            L.resolveDefault(callExec('/bin/cat', [
+                '/sys/kernel/debug/ieee80211/phy0/netdev:ap-mld-1/link-2/txpower'
             ]), { stdout: '' })
         ]);
     },
@@ -609,17 +624,17 @@ return view.extend({
                     fieldRow('RSNO layer',       rsnoSel),
                     fieldRow('PMF (ieee80211w)', roValue('required (=2) -- enforced for MLD')),
                     fieldRow('MLO', (function() {
-                        var mloOn = true; // mlo=1 is current state
+                        var mloOn = (uciData[mldSID] && uciData[mldSID]['mlo'] !== '0');
                         var mloBtn = E('button', { 'style':
-                            'background:#3a0a0a;color:#f4a0a0;border:1px solid #e24b4a;' +
-                            'border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer' },
-                            'Disable MLO (switch to single-band)');
+                            mloOn
+                                ? 'background:#3a0a0a;color:#f4a0a0;border:1px solid #e24b4a;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer'
+                                : 'background:#0a2a0a;color:#7fff7f;border:1px solid #1d9e75;border-radius:4px;padding:4px 12px;font-size:11px;cursor:pointer' },
+                            mloOn ? 'Disable MLO (switch to single-band)' : 'Enable MLO (switch to multi-link)');
                         mloBtn.addEventListener('click', function() {
                             if (!confirm(
-                                'WARNING: Disabling MLO will switch ap_mld_1 to single-band mode.\n' +
-                                'This requires a full reboot to take effect.\n' +
-                                'The router will be unreachable until you reboot.\n\n' +
-                                'Are you sure you want to disable MLO?'
+                                mloOn
+                                ? 'WARNING: Disabling MLO will switch ap_mld_1 to single-band mode.\nThis requires a full reboot to take effect.\nAre you sure?'
+                                : 'Enable MLO on ap_mld_1.\nThis requires a full reboot to take effect.\nAre you sure?'
                             )) return;
                             var callUciSetMlo = rpc.declare({ object:'uci', method:'set',
                                 params:['config','section','values'], expect:{} });
@@ -627,7 +642,8 @@ return view.extend({
                                 params:['config'], expect:{} });
                             mloBtn.disabled = true;
                             mloBtn.textContent = 'Writing UCI...';
-                            L.resolveDefault(callUciSetMlo('wireless', mldSID, { mlo: '0' }), null)
+                            var newMlo = mloOn ? '0' : '1';
+                            L.resolveDefault(callUciSetMlo('wireless', mldSID, { mlo: newMlo }), null)
                             .then(function() { return L.resolveDefault(callUciCommitMlo('wireless'), null); })
                             .then(function() {
                                 mloBtn.textContent = 'Done -- REBOOT REQUIRED';
@@ -637,7 +653,7 @@ return view.extend({
                             });
                         });
                         var wrap = E('div', { 'style': 'display:flex;align-items:center;gap:10px' }, [
-                            roValue('mlo=1 -- enabled'),
+                            roValue((mloOn ? 'mlo=1 -- enabled' : 'mlo=0 -- disabled') + '  (reboot required to change)'), 
                             mloBtn
                         ]);
                         return wrap;
@@ -1068,6 +1084,7 @@ return view.extend({
                     E('span', { 'style': 'font-family:monospace;font-size:12px;color:#fff' }, sta.mac),
                     sta.connected ? E('span', { 'style': 'color:#888;margin-left:8px' }, 'connected: ' + sta.connected) : '',
                     E('br'),
+                    (function() { var mb = modeBadge(sta.tx); return mb ? E('span', {}, [mb, ' ']) : ''; })(),
                     'signal: ' + (sta.signal || '?') + (sta.signal_arr ? ' ' + sta.signal_arr : '') + ' dBm' +
                     (sta.tx ? '  |  Tx: ' + sta.tx : '') + (sta.rx ? '  |  Rx: ' + sta.rx : '')
                 ])
@@ -1081,8 +1098,10 @@ return view.extend({
                 var lk = sta.links[lid], bg = bandBg[lid]||'#1a1a3a', fg = bandFg[lid]||'#aaa', name = bandNames[lid]||('Link '+lid);
                 if (lk.idle) return E('div', { 'style': 'font-size:11px;margin-top:5px;color:#555;display:flex;align-items:center;gap:6px' },
                     [badge(name, bg, fg), E('span', {}, 'idle (STR)  |  peer: ' + lk.addr)]);
+                var mBadge = modeBadge(lk.tx);
                 return E('div', { 'style': 'font-size:11px;margin-top:5px;color:#ccc;display:flex;align-items:flex-start;gap:6px' }, [
                     badge(name, bg, fg),
+                    mBadge || E('span', {}),
                     E('div', { 'style': 'line-height:1.8' }, [
                         'signal: ' + lk.signal + (lk.signal_arr ? ' ' + lk.signal_arr : '') + ' dBm',
                         E('br'), 'Tx: ' + lk.tx, E('br'), 'Rx: ' + lk.rx, E('br'), 'peer MAC: ' + lk.addr
@@ -1118,11 +1137,16 @@ return view.extend({
     },
 
         renderDiagnostics: function(data) {
-        var skuRaw = data[2].stdout  ? data[2].stdout.trim()  : '?';
-        var fwRaw  = data[10].stdout ? data[10].stdout.trim() : '?';
-        var tp0    = data[11].stdout || '';
-        var tp1    = data[12].stdout || '';
-        var tp2    = data[13].stdout || '';
+        var skuRaw  = data[2].stdout  ? data[2].stdout.trim()  : '?';
+        var fwRaw   = data[10].stdout ? data[10].stdout.trim() : '?';
+        var tp0     = data[11].stdout || '';
+        var tp1     = data[12].stdout || '';
+        var tp2     = data[13].stdout || '';
+        var matTbl  = data[14] ? (data[14].stdout || '') : '';
+        var dfsStat = data[15] ? (data[15].stdout || '') : '';
+        var ltp0    = data[16] ? (data[16].stdout || '').trim() : '?';
+        var ltp1    = data[17] ? (data[17].stdout || '').trim() : '?';
+        var ltp2    = data[18] ? (data[18].stdout || '').trim() : '?';
 
         var skuBad = skuRaw === '1';
 
@@ -1161,7 +1185,23 @@ return view.extend({
                 E('pre', { 'style':
                     'font-size:11px;color:#aaa;margin:0;' +
                     'white-space:pre-wrap;line-height:1.5' },
-                    tp2 || 'N/A'))
+                    tp2 || 'N/A')),
+            sectionBox('Per-link current TX power', '#444', null,
+                E('div', {}, [
+                    fieldRow('Link 0 (2.4G)', roValue(ltp0 ? ltp0 + ' (raw debugfs)' : 'N/A')),
+                    fieldRow('Link 1 (5G)',   roValue(ltp1 ? ltp1 + ' (raw debugfs)' : 'N/A')),
+                    fieldRow('Link 2 (6G)',   roValue(ltp2 ? ltp2 + ' (raw debugfs)' : 'N/A'))
+                ])),
+            sectionBox('DFS status -- band 1 (5 GHz)', '#444', null,
+                E('pre', { 'style':
+                    'font-size:11px;color:#aaa;margin:0;' +
+                    'white-space:pre-wrap;line-height:1.5' },
+                    dfsStat || 'N/A')),
+            sectionBox('MAT table', '#444', null,
+                E('pre', { 'style':
+                    'font-size:11px;color:#aaa;margin:0;' +
+                    'white-space:pre-wrap;line-height:1.5' },
+                    matTbl || 'N/A'))
         ]);
     },
 
