@@ -821,8 +821,8 @@ return view.extend({
             progressDiv,
             (function() {
                 // --- Add MLD network section ---
-                var callUciAddMld    = rpc.declare({ object:'uci', method:'add',
-                    params:['config','type'], expect:{ section:'' } });
+                var callUciSetType   = rpc.declare({ object:'uci', method:'set',
+                    params:['config','section','type'], expect:{} });
                 var callUciSetMld2   = rpc.declare({ object:'uci', method:'set',
                     params:['config','section','values'], expect:{} });
                 var callUciCommitMld2 = rpc.declare({ object:'uci', method:'commit',
@@ -910,10 +910,10 @@ return view.extend({
                     addStatusSpan.textContent = 'Creating ' + newSID + '...';
 
                     // UCI add wifi-iface + set values + commit + wifi restart
-                    L.resolveDefault(callUciAddMld('wireless', 'wifi-iface'), null)
-                    .then(function(res) {
-                        // Use the section name returned by UCI add, or fallback to newSID
-                        var sid = (res && res.section) ? res.section : newSID;
+                    // Create named section: uci set wireless.mlo0=wifi-iface
+                    L.resolveDefault(callUciSetType('wireless', newSID, 'wifi-iface'), null)
+                    .then(function() {
+                        var sid = newSID;
                         addStatusSpan.textContent = 'Writing UCI (' + sid + ')...';
                         return L.resolveDefault(callUciSetMld2('wireless', sid, {
                             ssid:       ssid,
