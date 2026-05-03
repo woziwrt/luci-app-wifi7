@@ -287,72 +287,101 @@ return view.extend({
 
     activeTab: 'overview',
 
+    // Derive hostapd/iw ifname from UCI section name
+    // ap_mld_1 -> ap-mld-1, mlo0 -> ap-mld0, mlo1 -> ap-mld1
+    _mldIfname: function(sid) {
+        if (sid === 'ap_mld_1') return 'ap-mld-1';
+        var m = sid.match(/^mlo(\d+)$/);
+        if (m) return 'ap-mld' + m[1];
+        // generic fallback: replace underscores with dashes
+        return sid.replace(/_/g, '-');
+    },
+
     loadData: function() {
-        return Promise.all([
-            L.resolveDefault(callUciGetWireless('wireless'), {}),
-            L.resolveDefault(callHostapdStatus(), {}),
-            L.resolveDefault(callExec('/bin/cat', [
+        var self = this;
+        // Phase 1: get UCI data synchronously to know all interfaces
+        return L.resolveDefault(callUciGetWireless('wireless'), {}).then(function(uciData) {
+
+        // Collect all MLD sections and legacy interfaces from UCI
+        var mldSIDs = [], legacySIDs = [];
+        Object.keys(uciData).sort().forEach(function(sid) {
+            var s = uciData[sid];
+            if (!s || s['.type'] !== 'wifi-iface' || s['mode'] !== 'ap') return;
+            if (s['mlo'] === '1') mldSIDs.push(sid);
+            else legacySIDs.push(sid);
+        });
+
+        // Build dynamic Promise.all
+        var calls = [
+            Promise.resolve(uciData),                          // [0] UCI
+            L.resolveDefault(callHostapdStatus(), {}),         // [1] hostapd status
+            L.resolveDefault(callExec('/bin/cat', [            // [2] sku_disable
                 '/sys/kernel/debug/ieee80211/phy0/mt76/sku_disable'
             ]), { stdout: '1' }),
-            L.resolveDefault(callExec('/usr/sbin/hostapd_cli', [
-                '-i', 'ap-mld-1', '-l', '0', 'stat'
-            ]), { stdout: '' }),
-            L.resolveDefault(callExec('/usr/sbin/hostapd_cli', [
-                '-i', 'ap-mld-1', '-l', '1', 'stat'
-            ]), { stdout: '' }),
-            L.resolveDefault(callExec('/usr/sbin/hostapd_cli', [
-                '-i', 'ap-mld-1', '-l', '2', 'stat'
-            ]), { stdout: '' }),
-            L.resolveDefault(callExec('/usr/sbin/iw', [
-                'dev', 'ap-mld-1', 'station', 'dump'
-            ]), { stdout: '' }),
-            L.resolveDefault(callExec('/usr/sbin/iw', [
-                'dev', 'phy0.0-ap0', 'station', 'dump'
-            ]), { stdout: '' }),
-            L.resolveDefault(callExec('/usr/sbin/iw', [
-                'dev', 'phy0.1-ap0', 'station', 'dump'
-            ]), { stdout: '' }),
-            L.resolveDefault(callExec('/usr/sbin/iw', [
-                'dev', 'phy0.2-ap0', 'station', 'dump'
-            ]), { stdout: '' }),
-            L.resolveDefault(callExec('/bin/cat', [
-                '/sys/kernel/debug/ieee80211/phy0/mt76/fw_version'
-            ]), { stdout: '' }),
-            L.resolveDefault(callExec('/bin/cat', [
-                '/sys/kernel/debug/ieee80211/phy0/mt76/band0/txpower_info'
-            ]), { stdout: '' }),
-            L.resolveDefault(callExec('/bin/cat', [
-                '/sys/kernel/debug/ieee80211/phy0/mt76/band1/txpower_info'
-            ]), { stdout: '' }),
-            L.resolveDefault(callExec('/bin/cat', [
-                '/sys/kernel/debug/ieee80211/phy0/mt76/band2/txpower_info'
-            ]), { stdout: '' }),
-            L.resolveDefault(callExec('/bin/cat', [
-                '/sys/kernel/debug/ieee80211/phy0/mt76/mat_table'
-            ]), { stdout: '' }),
-            L.resolveDefault(callExec('/bin/cat', [
-                '/sys/kernel/debug/ieee80211/phy0/mt76/dfs_status'
-            ]), { stdout: '' }),
-            L.resolveDefault(callExec('/bin/cat', [
-                '/sys/kernel/debug/ieee80211/phy0/netdev:ap-mld-1/link-0/txpower'
-            ]), { stdout: '' }),
-            L.resolveDefault(callExec('/bin/cat', [
-                '/sys/kernel/debug/ieee80211/phy0/netdev:ap-mld-1/link-1/txpower'
-            ]), { stdout: '' }),
-            L.resolveDefault(callExec('/bin/cat', [
-                '/sys/kernel/debug/ieee80211/phy0/netdev:ap-mld-1/link-2/txpower'
-            ]), { stdout: '' }),
-            L.resolveDefault(callExec('/bin/cat', [
-                '/proc/version'
-            ]), { stdout: '' }),
-            L.resolveDefault(callExec('/bin/sh', [
-                '-c', 'for d in /sys/class/thermal/thermal_zone*; do t=$(cat $d/temp 2>/dev/null); n=$(cat $d/type 2>/dev/null); [ -n "$t" ] && [ -n "$n" ] && echo "$n $((t/1000))"; done'
-            ]), { stdout: '' }),
-            L.resolveDefault(callExec('/bin/cat', [
-                '/sys/kernel/debug/ieee80211/phy0/netdev:ap-mld-1/mt76_links_info'
-            ]), { stdout: '' }),
-            callWirelessStatusExec()
-        ]);
+        ];
+
+        // [3..] MLD hostapd stat per link (0,1,2) per MLD network
+        mldSIDs.forEach(function(sid) {
+            var ifn = self._mldIfname(sid);
+            calls.push(L.resolveDefault(callExec('/usr/sbin/hostapd_cli',
+                ['-i', ifn, '-l', '0', 'stat']), { stdout: '' }));
+            calls.push(L.resolveDefault(callExec('/usr/sbin/hostapd_cli',
+                ['-i', ifn, '-l', '1', 'stat']), { stdout: '' }));
+            calls.push(L.resolveDefault(callExec('/usr/sbin/hostapd_cli',
+                ['-i', ifn, '-l', '2', 'stat']), { stdout: '' }));
+        });
+
+        // [3 + mldSIDs.length*3 ..] MLD station dumps
+        var mldStaBase = 3 + mldSIDs.length * 3;
+        mldSIDs.forEach(function(sid) {
+            var ifn = self._mldIfname(sid);
+            calls.push(L.resolveDefault(callExec('/usr/sbin/iw',
+                ['dev', ifn, 'station', 'dump']), { stdout: '' }));
+        });
+
+        // [mldStaBase + mldSIDs.length ..] Legacy station dumps
+        var legacyStaBase = mldStaBase + mldSIDs.length;
+        legacySIDs.forEach(function(sid) {
+            var s = uciData[sid];
+            var dev = s['device'] || 'radio0';
+            // Legacy ifname: phy0.0-ap0 etc -- derive from device
+            var devIdx = {'radio0':0,'radio1':1,'radio2':2}[dev];
+            var ifn = devIdx !== undefined ? ('phy0.' + devIdx + '-ap0') : (dev + '-ap0');
+            calls.push(L.resolveDefault(callExec('/usr/sbin/iw',
+                ['dev', ifn, 'station', 'dump']), { stdout: '' }));
+        });
+
+        // Fixed diagnostics calls at the end
+        var diagBase = legacyStaBase + legacySIDs.length;
+        [
+            ['/bin/cat', ['/sys/kernel/debug/ieee80211/phy0/mt76/fw_version']],
+            ['/bin/cat', ['/sys/kernel/debug/ieee80211/phy0/mt76/band0/txpower_info']],
+            ['/bin/cat', ['/sys/kernel/debug/ieee80211/phy0/mt76/band1/txpower_info']],
+            ['/bin/cat', ['/sys/kernel/debug/ieee80211/phy0/mt76/band2/txpower_info']],
+            ['/bin/cat', ['/sys/kernel/debug/ieee80211/phy0/mt76/mat_table']],
+            ['/bin/cat', ['/sys/kernel/debug/ieee80211/phy0/mt76/dfs_status']],
+            ['/bin/cat', ['/sys/kernel/debug/ieee80211/phy0/netdev:ap-mld-1/link-0/txpower']],
+            ['/bin/cat', ['/sys/kernel/debug/ieee80211/phy0/netdev:ap-mld-1/link-1/txpower']],
+            ['/bin/cat', ['/sys/kernel/debug/ieee80211/phy0/netdev:ap-mld-1/link-2/txpower']],
+            ['/bin/cat', ['/proc/version']],
+            ['/bin/sh',  ['-c', 'for d in /sys/class/thermal/thermal_zone*; do t=$(cat $d/temp 2>/dev/null); n=$(cat $d/type 2>/dev/null); [ -n "$t" ] && [ -n "$n" ] && echo "$n $((t/1000))"; done']],
+            ['/bin/cat', ['/sys/kernel/debug/ieee80211/phy0/netdev:ap-mld-1/mt76_links_info']],
+            ['/bin/sh',  ['-c', 'ubus call network.wireless status 2>/dev/null']],
+        ].forEach(function(c) {
+            calls.push(L.resolveDefault(callExec(c[0], c[1]), { stdout: '' }));
+        });
+
+        return Promise.all(calls).then(function(data) {
+            // Attach index metadata for render functions
+            data._mldSIDs     = mldSIDs;
+            data._legacySIDs  = legacySIDs;
+            data._mldStatBase = 3;
+            data._mldStaBase  = mldStaBase;
+            data._legacyStaBase = legacyStaBase;
+            data._diagBase    = diagBase;
+            return data;
+        });
+        }); // end phase 1
     },
 
     load: function() {
@@ -450,10 +479,15 @@ return view.extend({
         var uciData   = data[0];
         var hapdSt    = data[1];
         var skuRaw    = data[2].stdout ? data[2].stdout.trim() : '1';
-        var stat0     = parseStat(data[3].stdout || '');
-        var stat1     = parseStat(data[4].stdout || '');
-        var stat2     = parseStat(data[5].stdout || '');
-        var wlStatus  = data[22] || {};
+        var mldSIDs   = data._mldSIDs || ['ap_mld_1'];
+        var diagBase  = data._diagBase || 10;
+        var wlStatus  = data[diagBase + 12] || {};
+
+        // Get hostapd stat for first MLD network (primary)
+        var statBase = data._mldStatBase || 3;
+        var stat0 = parseStat(data[statBase]     ? (data[statBase].stdout || '')     : '');
+        var stat1 = parseStat(data[statBase + 1] ? (data[statBase + 1].stdout || '') : '');
+        var stat2 = parseStat(data[statBase + 2] ? (data[statBase + 2].stdout || '') : '');
 
         var skuOff  = skuRaw === '1';
         // Extract sku_idx from radio0 UCI (applies to all radios)
@@ -468,13 +502,17 @@ return view.extend({
             'radio2': hapdOK && !!(stat2['channel'] && stat2['channel'] !== '0')
         };
 
-        var mldSSID = '', mldEnc = '';
-        Object.keys(uciData).forEach(function(sid) {
-            var s = uciData[sid];
-            if (s['.type'] === 'wifi-iface' && s['mlo'] === '1') {
-                mldSSID = s['ssid'] || '';
-                mldEnc  = s['encryption'] || '';
-            }
+        // Collect ALL MLD networks from UCI
+        var self = this;
+        // Build MLD nets list using precomputed _mldSIDs from loadData
+        var mldNets = mldSIDs.map(function(sid) {
+            var s = uciData[sid] || {};
+            return {
+                sid:    sid,
+                ssid:   s['ssid'] || sid,
+                enc:    s['encryption'] || 'sae',
+                ifname: s['ifname'] || self._mldIfname(sid)
+            };
         });
 
         function linkCard(label, bg, fg, stat, radioName) {
@@ -507,17 +545,20 @@ return view.extend({
             ]);
         }
 
-        var mldBody = E('div', {}, [
-            E('div', { 'style': 'display:flex;gap:8px;margin-bottom:10px' }, [
-                linkCard('2.4 GHz -- Link 0', '#0a2a1a', '#5dcaa5', stat0, 'radio0'),
-                linkCard('5 GHz -- Link 1',   '#0a1a3a', '#85b7eb', stat1, 'radio1'),
-                linkCard('6 GHz -- Link 2',   '#1a0a3a', '#afa9ec', stat2, 'radio2')
-            ]),
-            E('div', { 'style': 'font-size:12px;color:#888' },
-                'type: ' + (stat0['ap_mld_type'] || 'STR') +
-                '  |  clients: ' + (stat0['num_sta[0]'] || '0') +
-                '  |  MLD MAC: ' + (stat0['mld_addr[0]'] || '?'))
-        ]);
+        // Build link body for a MLD network given its hostapd stats
+        function mldLinkBody(s0, s1, s2, netHapdOK) {
+            return E('div', {}, [
+                E('div', { 'style': 'display:flex;gap:8px;margin-bottom:10px' }, [
+                    linkCard('2.4 GHz -- Link 0', '#0a2a1a', '#5dcaa5', s0, 'radio0'),
+                    linkCard('5 GHz -- Link 1',   '#0a1a3a', '#85b7eb', s1, 'radio1'),
+                    linkCard('6 GHz -- Link 2',   '#1a0a3a', '#afa9ec', s2, 'radio2')
+                ]),
+                E('div', { 'style': 'font-size:12px;color:#888' },
+                    'type: ' + (s0['ap_mld_type'] || 'STR') +
+                    '  |  clients: ' + (s0['num_sta[0]'] || '0') +
+                    '  |  MLD MAC: ' + (s0['mld_addr[0]'] || '?'))
+            ]);
+        }
 
         var legacyRows = [];
         var bandInfo = {
@@ -546,29 +587,45 @@ return view.extend({
             }
         });
 
-        return E('div', {}, [
+        // Build MLD network boxes -- one per MLD UCI section, each with its own data
+        var mldBoxes = mldNets.map(function(net, idx) {
+            var base = statBase + idx * 3;
+            var s0 = parseStat(data[base]     ? (data[base].stdout     || '') : '');
+            var s1 = parseStat(data[base + 1] ? (data[base + 1].stdout || '') : '');
+            var s2 = parseStat(data[base + 2] ? (data[base + 2].stdout || '') : '');
+            var netOK = !!(s0['state'] === 'ENABLED' || s1['state'] === 'ENABLED' || s2['state'] === 'ENABLED');
+            var body = mldLinkBody(s0, s1, s2, netOK);
+            return sectionBox('MLD network -- ' + net.sid,
+                netOK ? '#1d9e75' : '#444',
+                'SSID: ' + net.ssid + '  |  ' + net.enc,
+                body);
+        });
+
+        var overviewItems = [
             skuBanner(skuOff, skuIdx),
             E('div', { 'style': 'font-size:12px;margin-bottom:14px;color:#aaa' }, [
                 'hostapd ap-mld-1: ',
                 E('strong', { 'style': 'color:' + (hapdOK ? '#1d9e75' : '#e24b4a') },
-                    hapdOK ? 'ENABLED' : 'NOT RUNNING')
-            ]),
-            sectionBox('MLD network -- ap_mld_1',
-                hapdOK ? '#1d9e75' : '#888',
-                'SSID: ' + mldSSID + '  |  ' + mldEnc,
-                mldBody),
-            E('div', { 'style':
-                'border:1px solid #444;border-radius:6px;overflow:hidden' }, [
-                E('div', { 'style':
-                    'background:#16213e;padding:7px 12px;' +
-                    'font-size:13px;font-weight:bold' },
-                    'Legacy networks'),
-                E('div', { 'style': 'padding:8px 12px' },
-                    legacyRows.length ? legacyRows
-                        : [E('div', { 'style': 'font-size:12px;color:#888' },
-                            'No legacy networks.')])
+                    hapdOK ? 'ENABLED' : 'NOT RUNNING'),
+                mldNets.length > 1
+                    ? E('span', { 'style': 'margin-left:12px;color:#888' },
+                        mldNets.length + ' MLD networks configured')
+                    : E('span', {})
             ])
-        ]);
+        ];
+        mldBoxes.forEach(function(b) { overviewItems.push(b); });
+        overviewItems.push(E('div', { 'style':
+                'border:1px solid #444;border-radius:6px;overflow:hidden' }, [
+            E('div', { 'style':
+                'background:#16213e;padding:7px 12px;' +
+                'font-size:13px;font-weight:bold' },
+                'Legacy networks'),
+            E('div', { 'style': 'padding:8px 12px' },
+                legacyRows.length ? legacyRows
+                    : [E('div', { 'style': 'font-size:12px;color:#888' },
+                        'No legacy networks.')])
+        ]));
+        return E('div', {}, overviewItems);
     },
 
     renderMLD: function(data) {
@@ -821,8 +878,6 @@ return view.extend({
             progressDiv,
             (function() {
                 // --- Add MLD network section ---
-                var callUciSetType   = rpc.declare({ object:'uci', method:'set',
-                    params:['config','section','type'], expect:{} });
                 var callUciSetMld2   = rpc.declare({ object:'uci', method:'set',
                     params:['config','section','values'], expect:{} });
                 var callUciCommitMld2 = rpc.declare({ object:'uci', method:'commit',
@@ -910,29 +965,28 @@ return view.extend({
                     addStatusSpan.textContent = 'Creating ' + newSID + '...';
 
                     // UCI add wifi-iface + set values + commit + wifi restart
-                    // Create named section: uci set wireless.mlo0=wifi-iface
-                    L.resolveDefault(callUciSetType('wireless', newSID, 'wifi-iface'), null)
+                    // Build UCI commands as single shell script
+                    var devList = selectedRadios.map(function(r) {
+                        return 'uci add_list wireless.' + newSID + '.device=' + r;
+                    }).join('; ');
+                    var uciScript = [
+                        'uci set wireless.' + newSID + '=wifi-iface',
+                        'uci set wireless.' + newSID + '.ssid=' + JSON.stringify(ssid),
+                        'uci set wireless.' + newSID + '.key=' + JSON.stringify(key),
+                        'uci set wireless.' + newSID + '.encryption=' + enc,
+                        'uci set wireless.' + newSID + '.ieee80211w=2',
+                        'uci set wireless.' + newSID + '.mlo=1',
+                        'uci set wireless.' + newSID + '.mode=ap',
+                        'uci set wireless.' + newSID + '.network=lan',
+                        devList,
+                        'uci commit wireless'
+                    ].join(' && ');
+
+                    addStatusSpan.textContent = 'Writing UCI (' + newSID + ')...';
+                    L.resolveDefault(callExec('/bin/sh', ['-c', uciScript]), null)
                     .then(function() {
-                        var sid = newSID;
-                        addStatusSpan.textContent = 'Writing UCI (' + sid + ')...';
-                        return L.resolveDefault(callUciSetMld2('wireless', sid, {
-                            ssid:       ssid,
-                            key:        key,
-                            encryption: enc,
-                            ieee80211w: '2',
-                            mlo:        '1',
-                            mode:       'ap',
-                            device:     selectedRadios,
-                            network:    'lan'
-                        }), null);
-                    })
-                    .then(function() {
-                        addStatusSpan.textContent = 'Committing...';
-                        return L.resolveDefault(callUciCommitMld2('wireless'), null);
-                    })
-                    .then(function() {
-                        addStatusSpan.textContent = 'Running wifi restart...';
-                        return callExec('/sbin/wifi', []);
+                        addStatusSpan.textContent = 'Running wifi reload...';
+                        return callExec('/sbin/wifi', ['reload']);
                     })
                     .then(function() {
                         addStatusSpan.textContent = 'Done -- reload page to see new network';
@@ -1681,12 +1735,38 @@ return view.extend({
     },
 
         renderStations: function(data) {
-        var mldStations = parseStationDump(data[6] ? (data[6].stdout || '') : '');
-        var legacyBands = [
-            { idx: 7,  name: '2.4G', iface: 'phy0.0-ap0', bg: '#0a2a1a', fg: '#5dcaa5' },
-            { idx: 8,  name: '5G',   iface: 'phy0.1-ap0', bg: '#0a1a3a', fg: '#85b7eb' },
-            { idx: 9,  name: '6G',   iface: 'phy0.2-ap0', bg: '#1a0a3a', fg: '#afa9ec' }
-        ];
+        var mldSIDs      = data._mldSIDs     || ['ap_mld_1'];
+        var legacySIDs   = data._legacySIDs  || [];
+        var mldStaBase   = data._mldStaBase  || 6;
+        var legacyStaBase = data._legacyStaBase || 7;
+        var uciData0     = data[0] || {};
+        var self = this;
+
+        // Build per-network station data
+        var mldNetStations = mldSIDs.map(function(sid, idx) {
+            var raw = data[mldStaBase + idx] ? (data[mldStaBase + idx].stdout || '') : '';
+            var s   = uciData0[sid] || {};
+            return {
+                sid:      sid,
+                ssid:     s['ssid'] || sid,
+                stations: parseStationDump(raw)
+            };
+        });
+
+        var legacyNetStations = legacySIDs.map(function(sid, idx) {
+            var raw = data[legacyStaBase + idx] ? (data[legacyStaBase + idx].stdout || '') : '';
+            var s   = uciData0[sid] || {};
+            return {
+                sid:      sid,
+                ssid:     s['ssid'] || sid,
+                device:   s['device'] || 'radio0',
+                stations: parseStationDump(raw)
+            };
+        });
+
+        // Keep backward compat for mldStations (first MLD net)
+        var mldStations = mldNetStations.length > 0 ? mldNetStations[0].stations : [];
+        // legacyBands now handled dynamically via legacyNetStations
         function parseLegacyDump(raw) {
             var stas = [], cur = null;
             raw.split('\n').forEach(function(line) {
@@ -1721,72 +1801,102 @@ return view.extend({
         var bandNames = { '0': '2.4G', '1': '5G', '2': '6G' };
         var bandBg    = { '0': '#0a2a1a', '1': '#0a1a3a', '2': '#1a0a3a' };
         var bandFg    = { '0': '#5dcaa5', '1': '#85b7eb', '2': '#afa9ec' };
-        var mldEls = mldStations.map(function(sta) {
-            var linkEls = Object.keys(sta.links).sort().map(function(lid) {
-                var lk = sta.links[lid], bg = bandBg[lid]||'#1a1a3a', fg = bandFg[lid]||'#aaa', name = bandNames[lid]||('Link '+lid);
-                if (lk.idle) return E('div', { 'style': 'font-size:11px;margin-top:5px;color:#555;display:flex;align-items:center;gap:6px' },
-                    [badge(name, bg, fg), E('span', {}, 'idle (STR)  |  peer: ' + lk.addr)]);
-                var mBadge = modeBadge(lk.tx);
-                var mBadgeEl = mBadge ? mBadge : E('span', {});
-                return E('div', { 'style': 'font-size:11px;margin-top:5px;color:#ccc;display:flex;align-items:flex-start;gap:6px' }, [
-                    badge(name, bg, fg),
-                    mBadgeEl,
-                    E('div', { 'style': 'line-height:1.8' }, [
-                        E('span', {}, 'signal: '), signalSpan(lk.signal, lk.signal_arr),
-                        E('br'), 'Tx: ' + lk.tx, E('br'), 'Rx: ' + lk.rx, E('br'), 'peer MAC: ' + lk.addr
-                    ])
+        // mldEls now handled by makeMldEls() function
+
+
+        // Dynamic MLD sections -- all networks with real station data
+        function makeMldEls(stations) {
+            return stations.map(function(sta) {
+                var linkEls = Object.keys(sta.links).sort().map(function(lid) {
+                    var lk = sta.links[lid], bg = bandBg[lid]||'#1a1a3a', fg = bandFg[lid]||'#aaa', name = bandNames[lid]||('Link '+lid);
+                    if (lk.idle) return E('div', { 'style': 'font-size:11px;margin-top:5px;color:#555;display:flex;align-items:center;gap:6px' },
+                        [badge(name, bg, fg), E('span', {}, 'idle (STR)  |  peer: ' + lk.addr)]);
+                    var mBadge = modeBadge(lk.tx);
+                    return E('div', { 'style': 'font-size:11px;margin-top:5px;color:#ccc;display:flex;align-items:flex-start;gap:6px' }, [
+                        badge(name, bg, fg), mBadge || E('span', {}),
+                        E('div', { 'style': 'line-height:1.8' }, [
+                            E('span', {}, 'signal: '), signalSpan(lk.signal, lk.signal_arr),
+                            E('br'), 'Tx: ' + lk.tx, E('br'), 'Rx: ' + lk.rx, E('br'), 'peer MAC: ' + lk.addr
+                        ])
+                    ]);
+                });
+                return E('div', { 'style': 'padding:10px 0;border-bottom:1px solid #2a2a3a' }, [
+                    E('div', { 'style': 'display:flex;align-items:center;gap:6px;margin-bottom:6px' }, [
+                        badge('MLD', '#0a1a3a', '#85b7eb'), badge('EHT', '#0a2a1a', '#5dcaa5'),
+                        E('span', { 'style': 'font-family:monospace;font-size:12px;color:#fff' }, sta.mac),
+                        E('span', { 'style': 'color:#888;font-size:11px;margin-left:4px' }, sta.connected ? 'connected: ' + sta.connected : '')
+                    ]),
+                    E('div', {}, linkEls)
                 ]);
             });
-            return E('div', { 'style': 'padding:10px 0;border-bottom:1px solid #2a2a3a' }, [
-                E('div', { 'style': 'display:flex;align-items:center;gap:6px;margin-bottom:6px' }, [
-                    badge('MLD', '#0a1a3a', '#85b7eb'), badge('EHT', '#0a2a1a', '#5dcaa5'),
-                    E('span', { 'style': 'font-family:monospace;font-size:12px;color:#fff' }, sta.mac),
-                    E('span', { 'style': 'color:#888;font-size:11px;margin-left:4px' }, sta.connected ? 'connected: ' + sta.connected : '')
-                ]),
-                E('div', {}, linkEls)
-            ]);
+        }
+
+        var totalClients = 0;
+        var allSections = [];
+
+        // All MLD network sections with real data
+        mldNetStations.forEach(function(net) {
+            totalClients += net.stations.length;
+            var els = makeMldEls(net.stations);
+            allSections.push(sectionBox(
+                'MLD clients -- ' + net.sid + ' (' + net.ssid + ')',
+                net.stations.length ? '#1d9e75' : '#888',
+                net.stations.length + ' connected',
+                E('div', {}, net.stations.length ? els
+                    : [E('div', { 'style': 'font-size:12px;color:#888;padding:4px 0' }, 'No MLD clients.')])
+            ));
         });
 
-
-        var legacyTotal = 0;
-        var legacySections = legacyBands.map(function(b) {
-            var stas = parseLegacyDump(data[b.idx] ? (data[b.idx].stdout || '') : '');
-            legacyTotal += stas.length;
-            var els = stas.map(function(s) { return legacyStaEl(s, b.bg, b.fg, b.name); });
-            return sectionBox('Legacy -- ' + b.iface, stas.length ? '#1d9e75' : '#888', stas.length + ' connected',
-                E('div', {}, stas.length ? els : [E('div', { 'style': 'font-size:12px;color:#888;padding:4px 0' }, 'No clients.')]));
+        // Dynamic legacy sections
+        var bandColors = {
+            'radio0': ['2.4G', '#0a2a1a', '#5dcaa5'],
+            'radio1': ['5G',   '#0a1a3a', '#85b7eb'],
+            'radio2': ['6G',   '#1a0a3a', '#afa9ec']
+        };
+        legacyNetStations.forEach(function(net) {
+            totalClients += net.stations.length;
+            var bc  = bandColors[net.device] || [net.device, '#222', '#aaa'];
+            var devIdx = {'radio0':0,'radio1':1,'radio2':2}[net.device];
+            var ifn = devIdx !== undefined ? ('phy0.' + devIdx + '-ap0') : (net.device + '-ap0');
+            var els = net.stations.map(function(s) { return legacyStaEl(s, bc[1], bc[2], bc[0]); });
+            allSections.push(sectionBox(
+                'Legacy -- ' + ifn,
+                net.stations.length ? '#1d9e75' : '#888',
+                net.stations.length + ' connected',
+                E('div', {}, net.stations.length ? els
+                    : [E('div', { 'style': 'font-size:12px;color:#888;padding:4px 0' }, 'No clients.')])
+            ));
         });
-        var totalClients = mldStations.length + legacyTotal;
-        return E('div', {}, [
-            sectionBox('MLD clients -- ap_mld_1', mldStations.length ? '#1d9e75' : '#888', mldStations.length + ' connected',
-                E('div', {}, mldStations.length ? mldEls : [E('div', { 'style': 'font-size:12px;color:#888;padding:4px 0' }, 'No MLD clients.')]))
-        ].concat(legacySections).concat([
-            E('div', { 'style': 'font-size:11px;color:#666;text-align:right;margin-top:4px' }, 'Total: ' + totalClients + ' client(s) -- auto-refresh 10s')
+
+        return E('div', {}, allSections.concat([
+            E('div', { 'style': 'font-size:11px;color:#666;text-align:right;margin-top:4px' },
+                'Total: ' + totalClients + ' client(s) -- auto-refresh 10s')
         ]));
     },
 
         renderDiagnostics: function(data) {
-        var uciData = data[0] || {};
-        var skuRaw  = data[2].stdout  ? data[2].stdout.trim()  : '?';
-        var fwRaw   = data[10].stdout ? data[10].stdout.trim() : '?';
-        var tp0     = data[11].stdout || '';
-        var tp1     = data[12].stdout || '';
-        var tp2     = data[13].stdout || '';
-        var matTbl  = data[14] ? (data[14].stdout || '') : '';
-        var dfsStat = data[15] ? (data[15].stdout || '') : '';
-        var ltp0    = data[16] ? (data[16].stdout || '').trim() : '?';
-        var ltp1    = data[17] ? (data[17].stdout || '').trim() : '?';
-        var ltp2    = data[18] ? (data[18].stdout || '').trim() : '?';
+        var uciData  = data[0] || {};
+        var diagBase = data._diagBase || 10;
+        var skuRaw   = data[2].stdout  ? data[2].stdout.trim()  : '?';
+        var fwRaw    = data[diagBase + 0] ? (data[diagBase + 0].stdout || '').trim() : '?';
+        var tp0      = data[diagBase + 1] ? (data[diagBase + 1].stdout || '') : '';
+        var tp1      = data[diagBase + 2] ? (data[diagBase + 2].stdout || '') : '';
+        var tp2      = data[diagBase + 3] ? (data[diagBase + 3].stdout || '') : '';
+        var matTbl  = data[diagBase+4] ? (data[diagBase+4].stdout || '') : '';
+        var dfsStat = data[diagBase+5] ? (data[diagBase+5].stdout || '') : '';
+        var ltp0    = data[diagBase+6] ? (data[diagBase+6].stdout || '').trim() : '?';
+        var ltp1    = data[diagBase+7] ? (data[diagBase+7].stdout || '').trim() : '?';
+        var ltp2    = data[diagBase+8] ? (data[diagBase+8].stdout || '').trim() : '?';
 
         // Parse kernel version from /proc/version: "Linux version X.Y.Z ..."
-        var procVer  = data[19] ? (data[19].stdout || '').trim() : '';
+        var procVer  = data[diagBase+9] ? (data[diagBase+9].stdout || '').trim() : '';
         var kernMatch = procVer.match(/Linux version (\S+)/);
         var kernStr  = kernMatch ? kernMatch[1] : (procVer || '?');
         var driverStr = 'mt7996 / kernel ' + kernStr;
 
         var skuBad   = skuRaw === '1';
-        var thermalRaw   = data[20] ? (data[20].stdout || '').trim() : '';
-        var linksInfoRaw = data[21] ? (data[21].stdout || '').trim() : '';
+        var thermalRaw   = data[diagBase+10] ? (data[diagBase+10].stdout || '').trim() : '';
+        var linksInfoRaw = data[diagBase + 11] ? (data[diagBase + 11].stdout || '').trim() : '';
         // Parse thermal: "type_name temp_int" e.g. "cpu-thermal 52"
         var thermalEl = (function() {
             if (!thermalRaw) return 'N/A';
